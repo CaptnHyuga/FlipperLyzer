@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sub-GHz Signal Explainer</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mut:#667085;--ac:#e8590c;--ok:#2b8a3e;--warn:#e67700;--bad:#c92a2a;--bd:#dde1e6;--wave:#1971c2;--code:#eef1f4}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14161a;--card:#1d2026;--tx:#e8eaed;--mut:#9aa3af;--ac:#ff922b;--ok:#69db7c;--warn:#ffc078;--bad:#ff8787;--bd:#2f343c;--wave:#74c0fc;--code:#262a31}}
+:root[data-theme="dark"]{--bg:#14161a;--card:#1d2026;--tx:#e8eaed;--mut:#9aa3af;--ac:#ff922b;--ok:#69db7c;--warn:#ffc078;--bad:#ff8787;--bd:#2f343c;--wave:#74c0fc;--code:#262a31}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.5rem;margin:0 0 4px}h2{font-size:1.05rem;margin:0 0 8px}
+p.sub{color:var(--mut);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:14px}
+#drop{border:2px dashed var(--bd);border-radius:12px;padding:28px 16px;text-align:center;cursor:pointer;background:var(--card)}
+#drop.over{border-color:var(--ac)}
+button,.btn{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer;margin:4px 6px 0 0}
+button.ghost{background:transparent;color:var(--tx);border:1px solid var(--bd)}
+.verdict{font-weight:600;font-size:1.1rem}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0}dt{color:var(--mut)}dd{margin:0}
+canvas{width:100%;height:90px;display:block;background:var(--code);border-radius:8px}
+.fr{font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;background:var(--code);border-radius:6px;padding:6px 8px;margin:4px 0;word-break:break-all}
+.fr b{color:var(--bad);background:rgba(255,80,80,.18)}
+.hex{font:14px ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+label{color:var(--mut);font-size:.9rem}
+details{margin-top:6px}summary{cursor:pointer;font-weight:600}
+li{margin:3px 0}
+.hide{display:none}
+</style></head><body><main>
+<h1>📡 Sub-GHz Signal Explainer</h1>
+<p class="sub">Drop a Flipper Zero RAW <code>.sub</code> capture. Signal contents stay on this computer; the OOK decoder runs locally.</p>
+
+<div id="drop"><div style="font-size:1.1rem">Drop a .sub file here or click to choose</div>
+<input id="file" type="file" accept=".sub,.txt" class="hide"></div>
+<div style="margin:8px 0 16px"><button class="ghost" id="demo">Try a demo signal</button></div>
+
+<div id="res" class="hide">
+  <div class="card"><div id="verdict" class="verdict"></div><p id="vmsg" style="margin:6px 0 0"></p><p id="parseNotes" class="sub" style="margin:6px 0 0"></p></div>
+ <div class="card"><h2>Signal shape (first message)</h2><canvas id="wave"></canvas>
+  <p class="sub" style="margin:6px 0 0">High = transmitter on, low = off. The pattern of short and long blocks is the data.</p></div>
+ <div class="card"><h2>What I found</h2><dl id="facts"></dl></div>
+ <div class="card"><h2>Estimated bits (frame-gap pulse omitted)</h2>
+  <label><input type="checkbox" id="flip"> Flip bits (0↔1)</label>
+  <div id="best" class="hex" style="margin:8px 0"></div>
+  <div id="frames"></div>
+  <p class="sub" style="margin:6px 0 0">Each row is one repeat of the message. <b style="color:var(--bad)">Red bits</b> differ from the most common version.</p>
+  <button id="dl">Download cleaned .sub</button><button class="ghost" id="cp">Copy hex</button>
+ </div>
+</div>
+
+<div id="rtcard" class="card hide"><h2>rtl_433 candidate decodes</h2><p class="sub" style="margin:0 0 8px">Matches are candidates, not confirmation. Check checksum fields such as <code>mic</code> and whether reported values are physically plausible.</p><pre id="rt" class="fr" style="white-space:pre-wrap;max-height:320px;overflow:auto"></pre></div>
+<details class="card"><summary>New to this? Quick glossary</summary><ul>
+<li><b>Pulse / gap</b>: transmitter on / off. A RAW file is just a list of their lengths in microseconds (µs).</li>
+<li><b>Timing guess</b>: pulse/gap widths can suggest PWM or PPM, but do not identify a protocol or prove a decode.</li>
+<li><b>Frame / repeat</b>: remotes send the same message several times per button press. Comparing repeats is how you check a decode.</li>
+<li><b>Fixed vs rolling code</b>: fixed codes repeat identically on every press. Rolling codes change each press, so replaying a saved one won't work.</li>
+<li><b>Cleaned .sub</b>: a normalized OOK estimate. It is not guaranteed to preserve the original signal or replay successfully.</li>
+</ul>Tip: capture the same button 3 times, then a different button, and compare the hex. What changes is the button; what stays is the device ID.</details>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let S=null;
+
+function parseSub(t){
+  const head=[],vals=[],fields={};
+  const invalid=error=>({head,vals,proto:fields.Protocol||'',fileType:fields.Filetype||'',freq:'',preset:'',key:'',warnings:[],syntheticClosingGap:false,error});
+  const warnings=[];let syntheticClosingGap=false;
+  for(const [i,line] of t.split(/\r?\n/).entries()){
+    const l=line.trim();
+    if(!l||l.startsWith('#')){if(l)head.push(l);continue}
+    const split=l.indexOf(':');
+    if(split<0)return invalid('Line '+(i+1)+' is not a Flipper Format field.');
+    const key=l.slice(0,split).trim(),value=l.slice(split+1).trim();
+    if(key==='RAW_Data'){
+      const tokens=value?value.split(/\s+/):[];
+      if(!tokens.length)return invalid('RAW_Data on line '+(i+1)+' is empty.');
+      if(tokens.length>512)warnings.push('RAW_Data line '+(i+1)+' has '+tokens.length+' values, above the documented 512-value line size.');
+      for(const token of tokens){
+        if(!/^[+-]?\d+$/.test(token))return invalid('RAW_Data contains a non-integer value.');
+        const duration=Number(token);
+        if(!Number.isSafeInteger(duration)||duration===0||duration< -2147483648||duration>2147483647)
+          return invalid('RAW_Data values must be nonzero signed 32-bit integers.');
+        vals.push(duration);
+      }
+      continue;
+    }
+    if(Object.prototype.hasOwnProperty.call(fields,key))return invalid('Duplicate '+key+' field.');
+    fields[key]=value;head.push(l);
+  }
+  for(const key of ['Filetype','Version','Frequency','Preset','Protocol'])
+    if(!fields[key])return invalid('Missing required '+key+' field.');
+  if(fields.Filetype==='Flipper SubGhz Key File')return {head,vals,proto:fields.Protocol||'',fileType:fields.Filetype,freq:fields.Frequency||'',preset:fields.Preset||'',key:fields.Key||'',warnings,error:''};
+  if(fields.Filetype!=='Flipper SubGhz RAW File')return invalid('Filetype must be Flipper SubGhz RAW File.');
+  if(fields.Version!=='1')return invalid('Only RAW file version 1 is supported.');
+  if(fields.Protocol!=='RAW')return invalid('Protocol must be RAW.');
+  if(!/^\d+$/.test(fields.Frequency)||Number(fields.Frequency)<1||Number(fields.Frequency)>4294967295)
+    return invalid('Frequency must be an unsigned 32-bit value in hertz.');
+  if(fields.Preset==='FuriHalSubGhzPresetCustom'){
+    if(!fields.Custom_preset_module||!fields.Custom_preset_data)
+      return invalid('Custom presets require Custom_preset_module and Custom_preset_data.');
+    if(!/^[0-9a-f]{2}(?:\s+[0-9a-f]{2})*$/i.test(fields.Custom_preset_data))
+      return invalid('Custom_preset_data must contain space-separated hexadecimal bytes.');
+  }
+  if(!vals.length)return invalid('RAW_Data is required.');
+  let leadingCount=0,leadingGap=0;
+  while(leadingCount<vals.length&&vals[leadingCount]<0){leadingGap-=vals[leadingCount];leadingCount++}
+  if(leadingCount)vals.splice(0,leadingCount);
+  if(!vals.length)return invalid('RAW_Data has no positive pulse after the leading gap.');
+  if(leadingCount)warnings.push('Dropped '+leadingCount+' leading negative timing(s), totaling '+leadingGap+' µs.');
+  const timings=[];let mergedSigns=0;
+  for(const duration of vals){
+    const previous=timings[timings.length-1];
+    if(previous!==undefined&&(previous>0)===(duration>0)){
+      const combined=previous+duration;
+      if(combined< -2147483648||combined>2147483647)return invalid('Merged RAW_Data duration exceeds signed 32-bit range.');
+      timings[timings.length-1]=combined;mergedSigns++;
+    }else timings.push(duration);
+  }
+  if(mergedSigns)warnings.push('Merged '+mergedSigns+' repeated-sign timing(s) into continuous levels.');
+  if(timings[timings.length-1]>0){
+    const closingGap=timings.reduce((gap,v)=>v<0?Math.max(gap,-v):gap,10000);
+    timings.push(-closingGap);syntheticClosingGap=true;warnings.push('Added a synthetic '+closingGap+' µs closing gap for the final pulse.');
+  }
+  return {head,vals:timings,proto:fields.Protocol,fileType:fields.Filetype,freq:fields.Frequency,preset:fields.Preset,key:fields.Key||'',warnings,syntheticClosingGap,error:''};
+}
+function toPairs(vals){
+  let s=[];
+  for(const v of vals){if(!v)continue;const on=v>0,d=Math.abs(v),p=s[s.length-1];
+    if(p&&p.on===on)p.d+=d;else s.push({on,d});}
+  const P=[];
+  for(let i=0;i+1<s.length;i+=2)if(s[i].on&&!s[i+1].on)P.push([s[i].d,s[i+1].d]);
+  return P;
+}
+function cluster(v){
+  const s=[...v].sort((a,b)=>a-b),g=[];
+  for(const x of s){const l=g[g.length-1];if(l&&x<=l[l.length-1]*1.3)l.push(x);else g.push([x]);}
+  return g.filter(a=>a.length>=Math.max(2,s.length*.03)).map(a=>({c:Math.round(a.reduce((x,y)=>x+y,0)/a.length),n:a.length}));
+}
+function findFrameGap(gaps){
+  const sorted=[...gaps].sort((a,b)=>a-b),groups=[];
+  for(const gap of sorted){const group=groups[groups.length-1];if(group&&gap<=group[group.length-1]*1.3)group.push(gap);else groups.push([gap])}
+  if(groups.length<2)return null;
+  for(let i=groups.length-1;i>0;i--){
+    const candidate=groups[i],previous=groups[i-1];
+    if((candidate.length>=2||candidate[0]>=3000)&&candidate[0]/previous[previous.length-1]>=1.3)
+      return {threshold:Math.sqrt(candidate[0]*previous[previous.length-1]),duration:median(candidate)};
+  }
+  return null;
+}
+const near=(cl,x)=>{let b=0;cl.forEach((k,i)=>{if(Math.abs(k.c-x)<Math.abs(cl[b].c-x))b=i});return b};
+const hex=b=>(b.match(/.{1,4}/g)||[]).map(x=>parseInt(x.padEnd(4,'0'),2).toString(16)).join('').toUpperCase();
+const median=a=>{const s=[...a].sort((x,y)=>x-y);return s[s.length>>1]};
+
+function analyze(text){
+  const p=parseSub(text);
+  $('res').classList.remove('hide');
+  $('parseNotes').textContent='';
+  if(p.fileType==='Flipper SubGhz Key File')return fail('Already decoded','This file contains a saved protocol key: '+esc(p.proto||'unknown')+'. The RAW timing analyzer is for Protocol: RAW files.','warn');
+  if(p.error)return fail('Invalid RAW .sub',esc(p.error));
+  $('parseNotes').textContent=p.warnings.join(' ');
+  if(!p.preset.startsWith('FuriHalSubGhzPresetOok'))
+    return fail('Timing view only','This valid RAW file uses preset '+esc(p.preset)+'. Automatic bit decoding and rtl_433 OOK analysis are limited to standard OOK presets.','warn');
+  const pairs=toPairs(p.vals);
+  if(pairs.length<16)return fail('Not enough signal','I found only '+pairs.length+' usable pulses. Try recording again closer to the remote.','warn');
+  const observedPairs=p.syntheticClosingGap?pairs.slice(0,-1):pairs;
+  const frameBoundary=findFrameGap(observedPairs.map(x=>x[1]));
+  let frames=[],cur=[];
+  for(let i=0;i<pairs.length;i++){const x=pairs[i];cur.push(x);if(frameBoundary&&(!p.syntheticClosingGap||i!==pairs.length-1)&&x[1]>=frameBoundary.threshold){frames.push(cur);cur=[]}}
+  if(cur.length)frames.push(cur);
+  frames=frames.filter(f=>f.length>=8);
+  if(!frames.length)return fail('No clear messages','I could not split the capture into repeated messages.','warn');
+  const payload=f=>frameBoundary&&f.length&&f[f.length-1][1]>=frameBoundary.threshold?f.slice(0,-1):f;
+  const symbols=frames.map(payload);
+  const pc=cluster(symbols.flatMap(f=>f.map(x=>x[0])));
+  const gc=cluster(symbols.flatMap(f=>f.map(x=>x[1])));
+  if(!pc.length||!gc.length)return fail('No clear timing structure','Pulse and gap lengths did not form a stable pattern.','warn');
+  let enc,fn;
+  if(pc.length===2&&gc.length===1){enc='PWM timing guess (short=1, long=0)';fn=f=>payload(f).map(x=>1-near(pc,x[0])).join('')}
+  else if(pc.length===1&&gc.length===2){enc='PPM timing guess (short gap=0, long gap=1)';fn=f=>payload(f).map(x=>near(gc,x[1])).join('')}
+  else return fail('No simple PWM/PPM structure','This capture has no clear two-level pulse or gap pattern. No bit estimate is shown.','warn');
+  const frameGap=frameBoundary?frameBoundary.duration:10000;
+  const tot=symbols.reduce((s,f)=>s+f.reduce((a,x)=>a+x[0]+x[1],0),0);
+  const nsym=symbols.reduce((s,f)=>s+f.length,0);
+  S={p,frames,pc,gc,fn,enc,frameGap,rate:Math.round(1e6/(tot/nsym))};
+  render();
+}
+function fail(t,m,kind='bad'){
+  $('verdict').className='verdict '+kind;$('verdict').textContent=t;$('vmsg').textContent='';$('vmsg').innerHTML=m;
+  ['wave','facts','best','frames'].forEach(i=>{const e=$(i);if(e.tagName!=='CANVAS')e.innerHTML=''});
+  document.querySelectorAll('#res .card').forEach((c,i)=>{if(i>0)c.classList.add('hide')});
+  S=null;
+}
+function render(){
+  document.querySelectorAll('#res .card').forEach(c=>c.classList.remove('hide'));
+  const fl=$('flip').checked,inv=b=>fl?b.replace(/[01]/g,c=>c==='1'?'0':'1'):b;
+  const bits=S.frames.map(f=>inv(S.fn(f)));
+  const cnt={};bits.forEach(b=>cnt[b]=(cnt[b]||0)+1);
+  const [best,n]=Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0];
+  const lens=new Set(bits.map(b=>b.length)),N=bits.length;
+  let cls,t,m;
+  if(N<2){cls='warn';t='⚠️ Only one message captured';m='I can decode it, but with no repeats I cannot cross-check. Hold the button a bit longer when recording.'}
+  else if(n>=2&&n/N>=.6){cls='ok';t='Stable timing pattern (heuristic)';m=n+' of '+N+' repeats match. This is a timing-based encoding guess, not a protocol identification.'}
+  else if(lens.size===1){cls='warn';t='⚠️ Same length, different content';m='The messages have equal length but different bits. Either the capture is noisy, or this is a rolling code that changes each send.'}
+  else{cls='bad';t='❌ No stable pattern';m='Repeats disagree in length and content. The encoding guess is probably wrong, or the signal is FSK/too noisy. Try another capture or the Flipper preset FSK.'}
+  $('verdict').className='verdict '+cls;$('verdict').textContent=t;$('vmsg').textContent=m;
+  const fq=S.p.freq?(+S.p.freq/1e6).toFixed(2)+' MHz':'unknown';
+  $('facts').innerHTML=[['Frequency',fq],['Preset',esc(S.p.preset||'unknown')],['Messages found',N],['Encoding guess',esc(S.enc)],
+    ['Pulse lengths',S.pc.map(k=>k.c+' µs').join(', ')],['Gap lengths',S.gc.map(k=>k.c+' µs').join(', ')],
+    ['Speed','~'+S.rate+' symbols/s'],['Bits per message',[...lens].join(' / ')]]
+    .map(([a,b])=>'<dt>'+a+'</dt><dd>'+b+'</dd>').join('');
+  S.best=best;$('best').innerHTML='Most common message ('+best.length+' bits):<br><b>'+hex(best)+'</b> <span style="color:var(--mut)">(hex)</span>';
+  $('frames').innerHTML=bits.slice(0,12).map(b=>'<div class="fr">'+[...b].map((c,i)=>best.length===b.length&&c!==best[i]?'<b>'+c+'</b>':c).join('')+'</div>').join('')+(N>12?'<div class="sub">…and '+(N-12)+' more</div>':'');
+  $('dl').disabled=false;
+  draw(S.frames[0]);
+}
+function draw(f){
+  const c=$('wave'),r=devicePixelRatio||1,w=c.clientWidth,h=90;
+  c.width=w*r;c.height=h*r;const x=c.getContext('2d');x.scale(r,r);
+  const tot=f.reduce((s,p)=>s+p[0]+p[1],0),k=w/tot,hi=14,lo=h-14;
+  x.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--wave');x.lineWidth=1.5;
+  x.beginPath();x.moveTo(0,lo);let t=0;
+  f.forEach(p=>{x.lineTo(t*k,lo);x.lineTo(t*k,hi);t+=p[0];x.lineTo(t*k,hi);x.lineTo(t*k,lo);t+=p[1];x.lineTo(t*k,lo)});
+  x.stroke();
+}
+function download(){
+  if(!S)return;
+  const inv=$('flip').checked,fn=f=>{const b=S.fn(f);return inv?b.replace(/[01]/g,c=>c==='1'?'0':'1'):b};
+  const f=S.frames.find(fr=>fn(fr)===S.best)||S.frames[0];
+  const one=[];
+  f.forEach((p,i)=>{one.push(S.pc[near(S.pc,p[0])].c,-(i===f.length-1?S.frameGap:S.gc[near(S.gc,p[1])].c))});
+  let v=[];for(let r=0;r<5;r++)v=v.concat(one);
+  let head=S.p.head.filter(l=>!/^(Protocol|Bit|Bit_RAW|TE|Data_RAW|Key|RAW_Data)/i.test(l));
+  head.push('Protocol: RAW');
+  let out=head.join('\n')+'\n';
+  for(let i=0;i<v.length;i+=400)out+='RAW_Data: '+v.slice(i,i+400).join(' ')+'\n';
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([out],{type:'text/plain'}));
+  a.download='cleaned.sub';a.click();
+}
+function demo(){
+  const code='101101110010011010110001',r=()=>1+(Math.random()-.5)*.16;let v=[];
+  for(let k=0;k<6;k++){
+    for(const b of code){v.push(Math.round((b==='1'?1200:400)*r()),-Math.round(400*r()))}
+    v.push(Math.round(400*r()),-9000);
+  }
+  analyze('Filetype: Flipper SubGhz RAW File\nVersion: 1\nFrequency: 433920000\nPreset: FuriHalSubGhzPresetOok650Async\nProtocol: RAW\nRAW_Data: '+v.join(' '));
+}
+const drop=$('drop'),inp=$('file');
+const load=f=>f&&f.text().then(analyze);
+drop.onclick=()=>inp.click();inp.onchange=()=>load(inp.files[0]);
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');load(e.dataTransfer.files[0])};
+$('demo').onclick=demo;$('flip').onchange=()=>S&&render();$('dl').onclick=download;
+$('cp').onclick=()=>{if(S)navigator.clipboard&&navigator.clipboard.writeText(hex(S.best))};
+addEventListener('resize',()=>S&&draw(S.frames[0]));
+
+const _an=analyze;analyze=function(t){_an(t);if(S)realTools(t);else $('rtcard').classList.add('hide')};
+function realTools(t){
+  if(!location.protocol.startsWith('http')||location.hostname.includes('claude'))return;
+  $('rtcard').classList.remove('hide');$('rt').textContent='Running rtl_433...';
+  fetch('/api/rtl433',{method:'POST',body:t}).then(r=>r.json()).then(j=>{$('rt').textContent=j.output}).catch(e=>{$('rt').textContent='Backend not reachable: '+e});
+}
+</script></body></html>
